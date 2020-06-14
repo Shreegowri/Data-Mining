@@ -1,0 +1,679 @@
+---
+title: "Breast Cancer Detection"
+output: word_document
+---
+
+```{r}
+#Libraries
+library(corrplot)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(GGally)
+library(tidyr)
+library(MASS)
+library(psych)
+library(Boruta)
+library(glmnet)
+library(caret)
+library(BBmisc)
+library(reshape)
+library(FNN)
+library(adabag)
+library(rpart)
+library(randomForest)
+library(neuralnet)
+library(e1071)
+library(funModeling)
+library(nnet)
+library(MLmetrics)
+library(ROCR)
+options(scipen = 999)
+set.seed(1)
+```
+
+```{r cars}
+data.df<-read.csv("BreastCancer-Wisconsin.csv",header=TRUE,sep = ',')
+data.df<-subset(data.df, select = -33)
+colnames(data.df)[3:12]<-c("radius","texture","perimeter", "area", "smoothness", "compactness","concavity","concave.points", "symmetry","fractal_dimension")
+data.df$diagnosis<-as.factor(data.df$diagnosis)
+```
+
+```{r}
+#summary statistics dataframe for all variables in the data set
+summary_stats<-(data.frame(describe(data.df[,3:32], na.rm = TRUE, skew=FALSE)))
+summary_stats$missing_values<-sapply(data.df[,3:32], function(x) sum(is.na(x))) 
+View(summary_stats)
+```
+
+```{r}
+#Data Visualization
+
+#Correlation Plot for Mean values of features computed for each image
+corrplot(cor(data.df[,3:12]),method = "color",addCoef.col = "black",
+         tl.col="black", tl.cex=0.5,number.cex = 0.4,cl.cex=0.5, diag=FALSE)
+
+#Correlation Plot for Standard error values of features
+corrplot(cor(data.df[,13:22]),method = "color",addCoef.col = "black",
+         tl.col="black", tl.cex=0.5,number.cex = 0.4,cl.cex=0.5, diag=FALSE)
+
+#Correlation Plot for Largest values of features
+corrplot(cor(data.df[,23:32]),method = "color",addCoef.col = "black",
+         tl.col="black", tl.cex=0.5,number.cex = 0.4,cl.cex=0.5, diag=FALSE)
+```
+
+```{r}
+x<-as.data.frame(scale(data.df[,3:32],scale = TRUE,center = TRUE))
+ndata<-cbind(data.df[,2],x)
+colnames(ndata)[1]<-c("diagnosis")
+summary(ndata)
+```
+
+```{r}
+#Box Blot classes of tumors across the mean values of the features.
+ggplot((melt(ndata[,c(1,2:11)], id.var = "diagnosis"))) +
+  geom_boxplot(aes(x =variable, y = value, fill =diagnosis))+ 
+  theme(plot.title = element_text(size=15, color="blue", face = "italic"), 
+        axis.title = element_text(size=10),legend.text=element_text(size=10)) +
+  labs(x="Predictors",y="Values",title="Box Plot for Features Mean",fill="Tumor Class")+
+  facet_wrap(~variable,scales = "free")
+
+#Box Blot classes of tumors across the standard error values of the features.
+ggplot((melt(ndata[,c(1,12:21)], id.var = "diagnosis"))) +
+  geom_boxplot(aes(x =variable, y = value, fill = diagnosis))+ 
+  theme(plot.title = element_text(size=15, color="blue", face = "italic"), 
+        axis.title = element_text(size=10),legend.text=element_text(size=10)) +
+  labs(x="Predictors",y="Values",title="Box Plot for Features Standard Error",fill="Tumor Class")+
+  facet_wrap(~variable,scales = "free")
+
+#Box Blot classes of tumors across the largest/worst values of the features.
+ggplot((melt(ndata[,c(1,22:31)], id.var = "diagnosis"))) +
+  geom_boxplot(aes(x =variable, y = value, fill = diagnosis))+ 
+  theme(plot.title = element_text(size=15, color="blue", face = "italic"), 
+        axis.title = element_text(size=10),legend.text=element_text(size=10)) +
+  labs(x="Predictors",y="Values",title="Box Plot for Features Largest/Worst Values",fill="Tumor Class")+
+  facet_wrap(~variable,scales = "free")
+```
+
+```{r}
+#pairs(data.df[,3:12], col="orange", main="Scatter Matrix")
+ggpairs(data.df[,3:12], ggplot2::aes(colour=data.df$diagnosis, alpha=0.4)) + 
+        labs("Correlation Plot")
+ggpairs(data.df[,13:22], ggplot2::aes(colour=data.df$diagnosis, alpha=0.4)) + 
+        labs("Correlation Plot")
+ggpairs(data.df[,23:32], ggplot2::aes(colour=data.df$diagnosis, alpha=0.4)) + 
+        labs("Correlation Plot")
+
+#Heatmap for correlation
+cor.mat<-round(cor(data.df[,-c(1,2)]),2)
+melt.cor.mat<-melt(cor.mat)
+ggplot(melt.cor.mat, aes(x=X1, y=X2, fill=value)) + geom_tile() + 
+        geom_text(aes(x=X1, y=X2, label=value))
+#histogram for the standard deviation of varibales and their largest values
+ggplot(gather(data.df[,13:32]), aes(value)) +
+        geom_histogram(bins = 20) + facet_wrap(~key, scales = 'free_x') +
+        labs(title = "Histogram for Standard Error and Largest Values")
+
+#data.df[,2:12] %>% gather (-diagnosis) %>% ggplot(aes(x=value, color=diagnosis)) +
+#geom_histogram(bins=20) + facet_wrap(~key, scales = 'free_x')
+
+#Parallel coordinaes plots for both the class types
+par(mfcol=c(2,1))
+parcoord(data.df[data.df$diagnosis=="M", 3:12], main="Diagnosis = M")
+parcoord(data.df[data.df$diagnosis=="B", 3:12], main="Diagnosis = B")
+```
+
+```{r}
+#Partitioning data 
+set.seed(1234)
+data.df$diagnosis<-ifelse(data.df$diagnosis=="M",1,0)
+data.train.rows<-sample(rownames(data.df), dim(data.df)[1]*0.6)
+data.train.df<-data.df[data.train.rows, ]
+
+#Validation data
+data.valid.rows<-sample(setdiff(rownames(data.df), data.train.rows), dim(data.df)[1]*0.3)
+data.valid.df<-data.df[data.valid.rows, ]
+
+#Test data
+data.test.rows<-setdiff(rownames(data.df), union(data.train.rows, data.valid.rows))
+data.test.df<-data.df[data.test.rows, ]
+
+#Standardizing
+x<-scale(data.train.df[,-c(1,2)], center = TRUE, scale=TRUE)
+scaled.train.df<-cbind(data.train.df[2], x)
+
+y<-scale(data.valid.df[,-c(1,2)], center = attr(x, "scaled:center"), scale = attr(x, "scaled:scale"))
+scaled.valid.df<-cbind(data.valid.df[2], y)
+
+y<-scale(data.test.df[,-c(1,2)], center = attr(x, "scaled:center"), scale = attr(x, "scaled:scale"))
+scaled.test.df<-cbind(data.test.df[2], y)
+remove(x)
+remove(y)
+```
+
+
+```{r}
+#Dimnension Reduction
+
+#PCA to input independent derived variables to our logistic regression
+
+#to check how many PCs to select
+fa.parallel(data.df[,3:32], fa="pc", n.iter = 100, show.legend = FALSE, sim=TRUE,
+            main =  "Scree plot with Parallel analysis")
+
+#Getting first 7 PCs
+pca<-principal(data.df[,3:32], nfactors = 7, rotate = "none")
+pca
+#data frame that will be used for logistic regression
+dataForlm<-pca$scores   
+
+#feature selection using LASSO
+x<-model.matrix(diagnosis~., data=data.df[,-1])
+x<-x[,-1]
+cv.glmnet.data<-cv.glmnet(x=x, y=data.df$diagnosis, type.measure = 'class', family='binomial', alpha=1)
+plot(cv.glmnet.data)
+c<-coef(cv.glmnet.data, s='lambda.min', exact=TRUE)
+inds<-which(c!=0)
+variables<-row.names(c)[inds]
+variables
+
+#Stepwise selection
+#lm.data<-lm(train.df$diagnosis~., data = train.df[,-c(1,2)])
+#lm.step.data<-step(lm.data, direction = "backward")
+```
+
+```{r}
+#Feature selection using Boruta RF
+boruta.data<-Boruta(diagnosis ~., data=data.train.df[,-1])
+getSelectedAttributes(TentativeRoughFix(boruta.data)) # to get important features
+```
+
+
+```{r}
+set.seed(1)
+#data.df$diagnosis<-ifelse(data.df$diagnosis=="M",0,1)
+nrow(dataForlm)
+cancerdata <- data.frame(cbind(dataForlm[,1:7],diagnosis=data.df$diagnosis))
+#cancerdata$diagnosis<-as.factor(cancerdata$diagnosis)
+
+#Splitting the dataset with the Principal Components into Training, Validation and Test Set
+#training data
+train.rows<-sample(rownames(cancerdata), dim(cancerdata)[1]*0.6)
+train.df<-cancerdata[train.rows, ]
+
+#Validation data
+valid.rows<-sample(setdiff(rownames(cancerdata), train.rows), dim(cancerdata)[1]*0.3)
+valid.df<-cancerdata[valid.rows, ]
+
+#Test data
+test.rows<-setdiff(rownames(cancerdata), union(train.rows, valid.rows))
+test.df<-cancerdata[test.rows, ]
+
+```
+
+#Implementation of algortithms:
+```{r}
+#Logistic Regression using PCA
+logit.reg <- glm(diagnosis ~ ., data = train.df, family = "binomial")
+summary(logit.reg)
+logit.reg$coefficients
+
+logit.reg.pred <- predict(logit.reg, valid.df[,-8], type = "response")
+logit.reg.pred.class<- ifelse(logit.reg.pred>=0.5,1,0)
+#data.frame(actual = valid.df$diagnosis[1:20], predicted = logit.reg.pred[1:20])
+confusionMatrix(data=as.factor(as.numeric(logit.reg.pred>0.5)), reference = as.factor(valid.df$diagnosis), positive = "1")
+F1.Score<- F1_Score(y_pred = logit.reg.pred.class, y_true = valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Logistic Regression using LASSO selected features
+logit.reg1 <- glm(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, family = "binomial")
+summary(logit.reg1)
+
+logit.reg1$coefficients
+logit.reg.pred1 <- predict(logit.reg1, scaled.valid.df[,-1], type = "response")
+logit.reg.pred.class1<- ifelse(logit.reg.pred1>=0.5,"1","0")
+confusionMatrix(data=as.factor(as.numeric(logit.reg.pred1>0.5)), reference = as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score<- F1_Score(y_pred = logit.reg.pred.class1, y_true = as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score
+```
+
+```{r}
+#Logistic Regression using Boruta selected features
+logit.reg2 <- glm(diagnosis ~. , data = scaled.train.df[, -c(13,16,20,21)], family = "binomial")
+summary(logit.reg2)
+
+logit.reg2$coefficients
+logit.reg.pred2 <- predict(logit.reg2, scaled.valid.df[, -c(1,13,16,20,21)], type = "response")
+logit.reg.pred.class2<- ifelse(logit.reg.pred2>=0.5,"1","0")
+confusionMatrix(data=as.factor(as.numeric(logit.reg.pred2>0.5)), reference = as.factor(scaled.valid.df$diagnosis), positive = "1")
+
+F1.Score<- F1_Score(y_pred = logit.reg.pred.class2, y_true = as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score
+```
+
+```{r}
+#Logistic Regression after removing correlated features
+logit.reg3 <- glm(diagnosis ~. , data = scaled.train.df[, -c(2,4,12,14,22,24)], family = "binomial")
+summary(logit.reg3)
+
+logit.reg3$coefficients
+logit.reg.pred3 <- predict(logit.reg3, scaled.valid.df[, -c(1,2,4,12,14,22,24)], type = "response")
+logit.reg.pred.class3<- ifelse(logit.reg.pred3>=0.5,"1","0")
+confusionMatrix(data=as.factor(as.numeric(logit.reg.pred3>0.5)), reference = as.factor(scaled.valid.df$diagnosis), positive = "1")
+
+F1.Score<- F1_Score(y_pred = logit.reg.pred.class3, y_true = as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score
+#accuracy reduced to 0.92 after removing correlated features
+```
+Logistic regression using PCA and LASSO are performing better than other versions. 
+
+```{r}
+#k-NN algorithm 
+scaled.train.df$diagnosis<-as.factor(scaled.train.df$diagnosis)
+scaled.valid.df$diagnosis<-as.factor(scaled.valid.df$diagnosis)
+accuracy1.df<-data.frame(k=seq(1,20,1), accuracy=rep(0,20))
+for(i in 1:20){
+        knnb.pred.overall<-knn(scaled.train.df[,-1], test = scaled.valid.df[,-1], k=i, cl=scaled.train.df[,1])
+        accuracy1.df[i,2]<-confusionMatrix(knnb.pred.overall, scaled.valid.df[,1])$overall[1]
+}
+accuracy1.df
+
+knnb.pred.overall<-knn(scaled.train.df[,-1], test = scaled.valid.df[,-1], k=3, cl=scaled.train.df[,1])
+confusionMatrix(knnb.pred.overall, scaled.valid.df[,1],positive="1")
+F1.Score<- F1_Score(y_pred = knnb.pred.overall, y_true = as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score
+```
+k=3 has the highest accuracy
+
+```{r}
+#k-NN algorithm using features from Lasso Regression
+accuracy3.df<-data.frame(k=seq(1,20,1), accuracy=rep(0,20))
+for(i in 1:20){
+        knnb.pred.lasso<-knn(scaled.train.df[,c(3,8,12,16:17,22:24,26,28:31)], test = scaled.valid.df[,c(3,8,12,16:17,22:24,26,28:31)], k=i, cl=scaled.train.df[,1])
+        accuracy3.df[i,2]<-confusionMatrix(knnb.pred.lasso, scaled.valid.df[,1])$overall[1]
+}
+accuracy3.df
+
+knnb.pred.lasso<-knn(scaled.train.df[,c(3,8,12,16:17,22:24,26,28:31)], test = scaled.valid.df[,c(3,8,12,16:17,22:24,26,28:31)], k=9, cl=scaled.train.df[,1])
+
+confusionMatrix(knnb.pred.lasso, scaled.valid.df[,1],positive="1")
+F1.Score<- F1_Score(y_pred = knnb.pred.lasso, y_true = as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score
+```
+k=9 has highest accuracy
+
+```{r}
+#Naive Bayes
+summary(data.train.df)
+data.train.nb.df<-data.train.df
+data.valid.nb.df<-data.valid.df
+
+# Binning the numerical predictors for converting them into categorical
+x<-discretize_get_bins(data.train.df[,-c(1:2)],n_bins = 10)
+data.train.nb.df<-discretize_df(data.train.nb.df,x)
+
+y<-discretize_get_bins(data.valid.df[,-c(1:2)],n_bins = 10)
+data.valid.nb.df<-discretize_df(data.valid.nb.df,y)
+
+#Fitting the Model
+nb<-naiveBayes(diagnosis~.,data=data.train.nb.df[,-1])
+?naiveBayes
+#Validation
+nb.pred<-predict(nb,newdata=data.valid.nb.df[,-1])
+confusionMatrix(nb.pred,reference=data.valid.nb.df$diagnosis, positive="1")
+```
+
+```{r}
+#Random Search
+data.train.df$diagnosis<-as.factor(data.train.df$diagnosis)
+data.valid.df$diagnosis<-as.factor(data.valid.df$diagnosis)
+control<-trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+set.seed(111)
+mtry<-sqrt(ncol(data.df)-2)
+rf.random<-train(diagnosis ~ ., data = data.train.df[,-1], method="rf", metric="Accuracy", trControl=control, tuneLength=15)
+plot(rf.random)
+```
+
+```{r}
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+set.seed(111)
+tunegrid <- expand.grid(.mtry=c(1:30))
+metric<-"Accuracy"
+rf_gridsearch <- train(diagnosis~., data=data.train.df[,-1], method="rf", metric=metric, tuneGrid=tunegrid, trControl=control)
+#print(rf_gridsearch)
+plot(rf_gridsearch)
+```
+
+```{r}
+#Random Forest(Ensemble Classifier)
+#data.train.df$diagnosis<-as.factor(data.train.df$diagnosis)
+#data.valid.df$diagnosis<-as.factor(data.valid.df$diagnosis)
+rf <- randomForest(diagnosis ~ ., data = data.train.df[,-1], ntree = 100, nodesize = 5, mtry=3, importance = TRUE)
+
+## confusion matrix
+rf.pred <- predict(rf, data.valid.df[,-1])
+confusionMatrix(rf.pred, data.valid.df$diagnosis, positive="1")
+F1.Score<- F1_Score(y_pred = rf.pred, y_true = data.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Boosted Tree
+boost <- boosting(diagnosis ~ ., data = data.train.df[,-1], method="class", mfinal = 100, minbucket = 5, cp=0.001)
+
+## confusion matrix
+boost.pred <- predict(boost, data.valid.df[,-1])
+confusionMatrix(as.factor(boost.pred$class), data.valid.df$diagnosis, positive="1")
+F1.Score<- F1_Score(y_pred = boost.pred$class,y_true = data.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Pruned Decision Tree
+ds.tr<-rpart(diagnosis~., data.train.df[,-1], method = "class", cp=0.0, minsplit=1)
+pruned.ct<-prune(ds.tr, cp=ds.tr$cptable[which.min(ds.tr$cptable[,"xerror"]), "CP"])
+
+ds.tr.pred <- predict(pruned.ct, newdata=data.valid.df[,-1], type=c("class"))
+confusionMatrix(as.factor(ds.tr.pred), data.valid.df$diagnosis, positive ="1")
+
+F1.Score<- F1_Score(y_pred = ds.tr.pred,y_true = data.valid.df$diagnosis, positive = "1")
+F1.Score
+#Fullgrown tree accuracy = 0.90
+```
+Since decision tree is a data driven method and as we don't have much training data, we see poor performance in all tree based models. It's unstable as well. 
+
+```{r}
+#Parameter Tuning for SVM
+tuned_parameters <- tune.svm(diagnosis~., data = scaled.train.df, gamma = 10^(-5:-1), cost = 10^(-3:3))
+summary(tuned_parameters)
+```
+
+```{r}
+#Support Vector Machine using linear kernel function and PC's
+train.df$diagnosis<-as.factor(train.df$diagnosis)
+valid.df$diagnosis<-as.factor(valid.df$diagnosis)
+test.df$diagnosis<-as.factor(test.df$diagnosis)
+svm.fit = svm(diagnosis ~ ., data = train.df, cost = 0.1, scale = FALSE, kernel="linear", tolerance=0.0000001)
+svm.pred<-predict(svm.fit, valid.df[,-8])
+confusionMatrix(as.factor(svm.pred), valid.df$diagnosis, positive = "1")
+F1.Score<- F1_Score(y_pred = svm.pred, y_true =valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+
+```{r}
+#Support Vector Machine using linear kernel function
+scaled.valid.df$diagnosis<-as.factor(scaled.valid.df$diagnosis)
+scaled.train.df$diagnosis<-as.factor(scaled.train.df$diagnosis)
+svm.fit = svm(diagnosis ~ ., data = scaled.train.df, cost = 0.1, scale = FALSE, kernel="linear", tolerance=0.0000001)
+svm.pred<-predict(svm.fit, scaled.valid.df[,-1])
+confusionMatrix(as.factor(svm.pred), as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score<- F1_Score(y_pred = svm.pred, y_true = scaled.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Support Vector Machine using linear kernel function and LASSO selected features
+svm.fit = svm(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, cost = 0.1, scale = FALSE, kernel="linear", tolerance=0.0000001)
+svm.pred<-predict(svm.fit, scaled.valid.df[,-1])
+confusionMatrix(as.factor(svm.pred), as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score<- F1_Score(y_pred = svm.pred, y_true = scaled.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Support Vector Machine using radial kernel function
+svm.fit = svm(diagnosis ~ ., data = scaled.train.df, gamma = 0.01, cost = 10, scale = FALSE, kernel="radial", tolerance=0.0000001)
+svm.pred<-predict(svm.fit, scaled.valid.df[,-1])
+confusionMatrix(as.factor(svm.pred), as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score<- F1_Score(y_pred = svm.pred, y_true = scaled.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Support Vector Machine using sigmoid kernel function
+svm.fit = svm(diagnosis ~ ., data = scaled.train.df, gamma = 0.01, cost = 10, scale = FALSE, kernel="sigmoid", tolerance=0.0000001)
+svm.pred<-predict(svm.fit, scaled.valid.df[,-1])
+confusionMatrix(as.factor(svm.pred), as.factor(scaled.valid.df$diagnosis), positive = "1")
+F1.Score<- F1_Score(y_pred = svm.pred, y_true = scaled.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#10-fold Cross Validation for SVM using LASSO
+###     SELECTED MODEL -  Output FOR ROC   ###
+scaled.test.df$diagnosis<-as.factor(scaled.test.df$diagnosis)
+
+train_control<-trainControl(method = "cv", number=10,classProbs = T)
+
+levels(scaled.test.df$diagnosis) <- c("X1", "X0")
+levels(scaled.train.df$diagnosis) <- c("X1", "X0")
+
+svm.cv<-train(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, method="svmLinear", trControl = train_control)
+
+svm.cv.pred<-predict(svm.cv, scaled.test.df,type = "prob")
+svm.cv.pred.class<-as.factor(ifelse(svm.cv.pred[,2]>=0.5,"X0","X1"))
+confusionMatrix(as.factor(svm.cv.pred.class), as.factor(scaled.test.df$diagnosis), positive = "1")
+F1<- F1_Score(y_pred = svm.cv.pred, y_true=scaled.test.df$diagnosis, positive = "1")
+F1
+
+```
+
+```{r}
+#Support Vector Machine using linear kernel function and LASSO selected features
+svm.fit = svm(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, cost = 0.1, scale = FALSE, kernel="linear", tolerance=0.0000001)
+svm.pred<-predict(svm.fit, scaled.test.df[,-1])
+confusionMatrix(as.factor(svm.pred), as.factor(scaled.test.df$diagnosis), positive = "1")
+```
+
+
+```{r}
+#Support Vector Machine using linear kernel function and LASSO selected features
+svm.fit = svm(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, cost = 0.1, scale = FALSE, kernel="linear", tolerance=0.0000001)
+svm.pred<-predict(svm.fit, scaled.test.df[,-1])
+confusionMatrix(as.factor(svm.pred), as.factor(scaled.test.df$diagnosis), positive = "1")
+```
+
+```{r}
+#Neural Networks
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+set.seed(111)
+tunegrid.nn <-  expand.grid(.decay = seq(from=0, to=1, by=0.1), .size = seq(from=1, to=10, by=1))
+metric<-"Accuracy"
+scaled.train.df$diagnosis<-as.factor(scaled.train.df$diagnosis)
+nn_gridsearch <- train(diagnosis~.,data=scaled.train.df, method="nnet", metric=metric, tuneGrid=tunegrid.nn, trControl=control,trace = F)
+
+```
+
+```{r}
+#Neural Net for Complete Dataset
+#Using Size and Decay from Grid Search
+nn<-nnet(diagnosis ~. ,data=scaled.train.df,size=9,decay = 0.8,maxit=10000)
+nn.pred<-predict(nn,scaled.valid.df,type = "class")
+confusionMatrix(as.factor(nn.pred), as.factor(scaled.valid.df[,1]),positive="1")
+F1.Score<- F1_Score(y_pred = nn.pred, y_true = scaled.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Neural Net using features from LASSO
+nn<-nnet(diagnosis ~. ,data=scaled.train.df[,-c(2,4:7,10,14:15,18:20,27,30)],size=5,decay = 0.9,maxit=10000)
+nn.pred<-predict(nn,scaled.valid.df,type = "class")
+confusionMatrix(as.factor(nn.pred), as.factor(scaled.valid.df[,1]),positive="1")
+F1.Score<- F1_Score(y_pred = nn.pred, y_true = scaled.valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+```{r}
+#Neural Net using Features from Principal Components
+nn<-nnet(diagnosis ~. ,data=train.df,size=5,decay = 0.9,maxit=10000)
+nn.pred<-predict(nn,valid.df)
+nn.pred.class<-ifelse(nn.pred>=0.5,"1","0")
+confusionMatrix(as.factor(nn.pred.class), as.factor(valid.df$diagnosis),positive="1")
+F1.Score<- F1_Score(y_pred = nn.pred.class, y_true = valid.df$diagnosis, positive = "1")
+F1.Score
+```
+
+-- Cross Validation --
+```{r}
+#Partition for cross-validation
+set.seed(123)
+data.df$diagnosis<-as.factor(data.df$diagnosis)
+data.train.rows<-sample(rownames(data.df), dim(data.df)[1]*0.7)
+data.train.df<-data.df[data.train.rows, ]
+
+#Validation data
+data.valid.rows<-sample(setdiff(rownames(data.df), data.train.rows), dim(data.df)[1]*0.2)
+data.valid.df<-data.df[data.valid.rows, ]
+
+#Test data
+data.test.rows<-setdiff(rownames(data.df), union(data.train.rows, data.valid.rows))
+data.test.df<-data.df[data.test.rows, ]
+
+#Standardizing
+norm.values<-preProcess(data.train.df[,-1], method = c("center", "scale"))
+
+scaled.train.df<-predict(norm.values, data.train.df[,-1])
+scaled.valid.df<-predict(norm.values, data.valid.df[,-1])
+scaled.test.df<-predict(norm.values, data.test.df[,-1])
+
+```
+
+
+```{r}
+#10-fold Cross Validation for SVM
+train_control<-trainControl(method = "cv", number=10, savePredictions = TRUE)
+svm.cv<-train(diagnosis ~ ., data = scaled.train.df, method="svmLinear", trControl = train_control)
+
+svm.cv.pred<-predict(svm.cv, scaled.train.df[,-1])
+confusionMatrix(as.factor(svm.cv.pred), scaled.train.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = svm.cv.pred, y_true=scaled.train.df$diagnosis, positive = "1")
+F1
+
+svm.cv.pred<-predict(svm.cv, scaled.valid.df[,-1])
+confusionMatrix(as.factor(svm.cv.pred), scaled.valid.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = svm.cv.pred, y_true=scaled.valid.df$diagnosis, positive = "1")
+F1
+
+```
+
+```{r}
+#10-fold Cross Validation for SVM using LASSO selcted faetures
+train_control<-trainControl(method = "cv", number=10, savePredictions = TRUE)
+svm.cv<-train(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, method="svmLinear", trControl = train_control)
+
+svm.cv.pred<-predict(svm.cv, scaled.train.df[,-1])
+confusionMatrix(as.factor(svm.cv.pred), scaled.train.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = svm.cv.pred, y_true=scaled.train.df$diagnosis, positive = "1")
+F1
+
+svm.cv.pred<-predict(svm.cv, scaled.valid.df[,-1])
+confusionMatrix(as.factor(svm.cv.pred), scaled.valid.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = svm.cv.pred, y_true=scaled.valid.df$diagnosis, positive = "1")
+F1
+
+svm.cv.pred<-predict(svm.cv, scaled.test.df[,-1])
+confusionMatrix(as.factor(svm.cv.pred), scaled.test.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = svm.cv.pred, y_true=scaled.test.df$diagnosis, positive = "1")
+F1
+```
+
+```{r}
+#10 fold cross-validation for NN
+train_control<-trainControl(method = "cv", number=10, savePredictions =TRUE)
+nn.cv<-train(diagnosis ~ ., data = scaled.train.df, method="nnet", trControl = train_control)
+```
+
+```{r}
+nn.cv.pred<-predict(nn.cv, scaled.train.df[,-1])
+confusionMatrix(as.factor(nn.cv.pred), scaled.train.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = nn.cv.pred, y_true=scaled.train.df$diagnosis, positive = "1")
+F1
+
+nn.cv.pred<-predict(nn.cv, scaled.valid.df[,-1])
+confusionMatrix(as.factor(nn.cv.pred), scaled.valid.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = nn.cv.pred, y_true=scaled.valid.df$diagnosis, positive = "1")
+F1
+```
+
+
+```{r}
+#10 fold cross-validation for NN using LASSO
+train_control<-trainControl(method = "cv", number=10, savePredictions =TRUE)
+nn.cv<-train(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, method="nnet", trControl = train_control)
+```
+
+```{r}
+nn.cv.pred<-predict(nn.cv, scaled.train.df[,-1])
+confusionMatrix(as.factor(nn.cv.pred), scaled.train.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = nn.cv.pred, y_true=scaled.train.df$diagnosis, positive = "1")
+F1
+
+nn.cv.pred<-predict(nn.cv, scaled.valid.df[,-1])
+confusionMatrix(as.factor(nn.cv.pred), scaled.valid.df$diagnosis, positive = "1")
+F1<- F1_Score(y_pred = nn.cv.pred, y_true=scaled.valid.df$diagnosis, positive = "1")
+F1
+```
+
+
+```{r}
+#Delete
+#10-fold Cross Validation for SVM using LASSO selcted faetures
+new.test<-scaled.test.df
+new.train<-scaled.train.df
+new.valid<-scaled.valid.df
+
+levels(new.test$diagnosis) <- c("X0", "X1")
+levels(new.train$diagnosis) <- c("X0", "X1")
+levels(new.valid$diagnosis) <- c("X0", "X1")
+
+train_control<-trainControl(method = "cv", number=10, savePredictions = TRUE,classProbs = T)
+
+svm.cv<-train(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se
+              +texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst
+              +texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = new.train, method="svmLinear", trControl = train_control)
+
+svm.cv.pred<-predict(svm.cv, new.valid,type = "prob")
+svm.cv.pred.class<-as.factor(ifelse(svm.cv.pred[,2]>=0.5,"X1","X0"))
+confusionMatrix(as.factor(svm.cv.pred.class), as.factor(new.valid$diagnosis), positive = "X1")
+
+#Plotting ROC for SVM using features from Lasso (Validation Dataset)
+pred <- prediction(svm.cv.pred[,2],scaled.valid.df$diagnosis)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, main="ROC curve for SVM", colorize=T)
+auc<-performance(pred, measure = "auc")
+auc<-auc@y.values[[1]]
+print(paste("AUROC:", round(auc,3)))
+```
+
+```{r}
+#Plotting ROC for SVM using features from Lasso (Test Dataset)
+svm.cv.pred<-predict(svm.cv, new.test,type = "prob")
+svm.cv.pred.class<-as.factor(ifelse(svm.cv.pred[,2]>=0.5,"X1","X0"))
+confusionMatrix(as.factor(svm.cv.pred.class), as.factor(new.test$diagnosis), positive = "X1")
+
+pred <- prediction(svm.cv.pred[,2],scaled.test.df$diagnosis)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, main="ROC curve", colorize=T)
+auc<-performance(pred, measure = "auc")
+auc<-auc@y.values[[1]]
+print(paste("AUROC:", round(auc,3)))
+```
+
+```{r}
+#10 fold cross-validation for NN using LASSO
+#ROC Curve
+train_control<-trainControl(method = "cv", number=10, savePredictions =TRUE)
+nn.cv<-train(diagnosis ~ texture+concavity+concave.points+fractal_dimension+radius_se+texture_se+smoothness_se+compactness_se+fractal_dimension_se+radius_worst+texture_worst+perimeter_worst+area_worst+smoothness_worst+concavity_worst+concave.points_worst+symmetry_worst, data = scaled.train.df, method="nnet", trControl = train_control)
+
+nn.cv.pred.prop<-predict(nn.cv, scaled.valid.df[,-1],type = "prob")
+
+pred <- prediction(nn.cv.pred.prop$`1`,scaled.valid.df$diagnosis)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, main="ROC curve for NN", colorize=T)
+auc<-performance(pred, measure = "auc")
+auc<-auc@y.values[[1]]
+print(paste("AUROC:", round(auc,3)))
+```
